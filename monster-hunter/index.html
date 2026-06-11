@@ -10,6 +10,16 @@
 <body>
   <h1>MH Tracker</h1>
   <p id="syncStatus"><strong>Sync:</strong> Nur lokal gespeichert. Supabase noch nicht eingerichtet.</p>
+
+  <div id="authBox" style="border:1px solid #999; padding:12px; margin:12px 0; max-width:520px;">
+    <p><strong>Login:</strong> Melde dich mit deiner E-Mail an, damit deine Daten sicher online gespeichert werden.</p>
+    <p id="authStatus">Nicht eingeloggt.</p>
+    <p>
+      <input id="authEmailInput" type="email" placeholder="deine@email.de" style="width:260px;" />
+      <button id="loginBtn">Login-Link senden</button>
+      <button id="logoutBtn" hidden>Ausloggen</button>
+    </p>
+  </div>
     <p><strong>AKTUELL:</strong> <span id="currentDayBadge">TAG 1</span></p>
 
   <p>
@@ -244,8 +254,8 @@
 
       Die anon public key darf im Browser stehen. Dein Datenbank-Passwort NICHT eintragen.
     */
-    const SUPABASE_URL = "https://nscavwzfdgkzapasoyqk.supabase.co";
-    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5zY2F2d3pmZGdremFwYXNveXFrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODExNjYxOTksImV4cCI6MjA5Njc0MjE5OX0.tL8w0S8eTm_ATDv7wk_VL8Em8PhFtDL1KM4xCRBBnSY";
+    const SUPABASE_URL = "PASTE_SUPABASE_PROJECT_URL_HERE";
+    const SUPABASE_ANON_KEY = "PASTE_SUPABASE_ANON_PUBLIC_KEY_HERE";
     const CLOUD_STATE_ID = "monster-hunter-tracker";
 
     function isSupabaseConfigured() {
@@ -259,6 +269,12 @@
     let cloudSaveTimer = null;
 
     const syncStatus = document.getElementById("syncStatus");
+    const authBox = document.getElementById("authBox");
+    const authStatus = document.getElementById("authStatus");
+    const authEmailInput = document.getElementById("authEmailInput");
+    const loginBtn = document.getElementById("loginBtn");
+    const logoutBtn = document.getElementById("logoutBtn");
+    let currentUser = null;
     const monsterGridWrap = document.getElementById("monsterGridWrap");
     const favoritesWrap = document.getElementById("favoritesWrap");
     const currentDayBadge = document.getElementById("currentDayBadge");
@@ -1125,8 +1141,68 @@
       saveAllLocalOnly();
     }
 
+    function setAppVisible(isVisible) {
+      document.querySelectorAll(".tab-btn").forEach(btn => { btn.hidden = !isVisible; });
+      document.querySelectorAll(".tab-pane").forEach(pane => { pane.hidden = !isVisible || pane.id !== "sessionTab"; });
+      const badgeLine = currentDayBadge ? currentDayBadge.closest("p") : null;
+      if (badgeLine) badgeLine.hidden = !isVisible;
+    }
+
+    function updateAuthUi() {
+      if (!supabaseClient) {
+        if (authStatus) authStatus.textContent = "Supabase ist noch nicht eingerichtet.";
+        if (loginBtn) loginBtn.disabled = true;
+        if (logoutBtn) logoutBtn.hidden = true;
+        setAppVisible(true);
+        return;
+      }
+
+      const isLoggedIn = Boolean(currentUser);
+      if (authStatus) {
+        authStatus.textContent = isLoggedIn
+          ? "Eingeloggt als " + (currentUser.email || currentUser.id)
+          : "Nicht eingeloggt.";
+      }
+      if (authEmailInput) authEmailInput.hidden = isLoggedIn;
+      if (loginBtn) loginBtn.hidden = isLoggedIn;
+      if (logoutBtn) logoutBtn.hidden = !isLoggedIn;
+      setAppVisible(isLoggedIn);
+    }
+
+    async function sendLoginLink() {
+      if (!supabaseClient) return;
+      const email = (authEmailInput?.value || "").trim();
+      if (!email) {
+        if (authStatus) authStatus.textContent = "Bitte zuerst deine E-Mail-Adresse eingeben.";
+        return;
+      }
+
+      if (authStatus) authStatus.textContent = "Sende Login-Link ...";
+      const { error } = await supabaseClient.auth.signInWithOtp({
+        email,
+        options: {
+          emailRedirectTo: window.location.href.split("#")[0]
+        }
+      });
+
+      if (error) {
+        console.error("Supabase auth error:", error);
+        if (authStatus) authStatus.textContent = "Login-Link konnte nicht gesendet werden: " + error.message;
+      } else {
+        if (authStatus) authStatus.textContent = "Login-Link gesendet. Prüfe deine E-Mails.";
+      }
+    }
+
+    async function logout() {
+      if (!supabaseClient) return;
+      await supabaseClient.auth.signOut();
+      currentUser = null;
+      updateAuthUi();
+      setSyncStatus("Ausgeloggt. Online-Daten sind geschützt.");
+    }
+
     async function loadCloudState() {
-      if (!supabaseClient) return null;
+      if (!supabaseClient || !currentUser) return null;
 
       setSyncStatus("Lade Online-Daten ...");
 
@@ -1150,6 +1226,10 @@
         setSyncStatus("Nur lokal gespeichert. Supabase noch nicht eingerichtet.");
         return;
       }
+      if (!currentUser) {
+        setSyncStatus("Nicht eingeloggt. Online-Speichern pausiert.");
+        return;
+      }
 
       const { error } = await supabaseClient
         .from("tracker_states")
@@ -1168,7 +1248,7 @@
     }
 
     function requestCloudSave() {
-      if (!supabaseClient) return;
+      if (!supabaseClient || !currentUser) return;
       clearTimeout(cloudSaveTimer);
       cloudSaveTimer = setTimeout(saveCloudState, 500);
     }
@@ -1183,19 +1263,54 @@
       renderUthTimes();
     }
 
-    async function initApp() {
-      switchTab("sessionTab");
+    async function loadAndRenderForCurrentUser() {
+      if (!currentUser) {
+        updateAuthUi();
+        setSyncStatus("Bitte einloggen, um Online-Daten zu laden.");
+        return;
+      }
 
       const cloudState = await loadCloudState();
       if (cloudState) {
         applyStateFromCloud(cloudState);
         setSyncStatus("Online-Daten geladen.");
-      } else if (supabaseClient) {
+      } else {
         setSyncStatus("Keine Online-Daten gefunden. Lokale Daten werden hochgeladen ...");
         await saveCloudState();
       }
 
       renderAll();
+      updateAuthUi();
+    }
+
+    async function initApp() {
+      switchTab("sessionTab");
+      if (loginBtn) loginBtn.addEventListener("click", sendLoginLink);
+      if (logoutBtn) logoutBtn.addEventListener("click", logout);
+      if (authEmailInput) {
+        authEmailInput.addEventListener("keydown", event => {
+          if (event.key === "Enter") sendLoginLink();
+        });
+      }
+
+      if (!supabaseClient) {
+        setSyncStatus("Nur lokal gespeichert. Supabase noch nicht eingerichtet.");
+        renderAll();
+        updateAuthUi();
+        return;
+      }
+
+      const { data } = await supabaseClient.auth.getSession();
+      currentUser = data.session?.user || null;
+      updateAuthUi();
+      await loadAndRenderForCurrentUser();
+
+      supabaseClient.auth.onAuthStateChange(async (_event, session) => {
+        currentUser = session?.user || null;
+        updateAuthUi();
+        if (currentUser) await loadAndRenderForCurrentUser();
+        else setSyncStatus("Ausgeloggt. Online-Daten sind geschützt.");
+      });
     }
 
     initApp();
