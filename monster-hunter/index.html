@@ -5,9 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>MH Tracker</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
   <h1>MH Tracker</h1>
+  <p id="syncStatus"><strong>Sync:</strong> Nur lokal gespeichert. Supabase noch nicht eingerichtet.</p>
     <p><strong>AKTUELL:</strong> <span id="currentDayBadge">TAG 1</span></p>
 
   <p>
@@ -234,6 +236,29 @@
     const FAVORITES_KEY = "mh-tracker-favorites-v1";
     const FAVORITE_GOALS_KEY = "mh-tracker-favorite-goals-v1";
 
+    /*
+      SUPABASE EINRICHTUNG:
+      1) In Supabase eine Tabelle "tracker_states" erstellen.
+      2) SUPABASE_URL und SUPABASE_ANON_KEY unten eintragen.
+      3) Datei speichern, auf GitHub hochladen, warten bis GitHub Pages deployed hat.
+
+      Die anon public key darf im Browser stehen. Dein Datenbank-Passwort NICHT eintragen.
+    */
+    const SUPABASE_URL = "PASTE_SUPABASE_PROJECT_URL_HERE";
+    const SUPABASE_ANON_KEY = "PASTE_SUPABASE_ANON_PUBLIC_KEY_HERE";
+    const CLOUD_STATE_ID = "monster-hunter-tracker";
+
+    function isSupabaseConfigured() {
+      return SUPABASE_URL.startsWith("https://") && !SUPABASE_ANON_KEY.includes("PASTE_");
+    }
+
+    const supabaseClient = isSupabaseConfigured()
+      ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+      : null;
+
+    let cloudSaveTimer = null;
+
+    const syncStatus = document.getElementById("syncStatus");
     const monsterGridWrap = document.getElementById("monsterGridWrap");
     const favoritesWrap = document.getElementById("favoritesWrap");
     const currentDayBadge = document.getElementById("currentDayBadge");
@@ -321,10 +346,12 @@
 
     function saveFavorites() {
       localStorage.setItem(FAVORITES_KEY, JSON.stringify(favorites));
+      requestCloudSave();
     }
 
     function saveFavoriteGoals() {
       localStorage.setItem(FAVORITE_GOALS_KEY, JSON.stringify(favoriteGoals));
+      requestCloudSave();
     }
 
     function isFavorite(monster) {
@@ -389,6 +416,7 @@
 
     function saveDays() {
       localStorage.setItem(DAY_STORAGE_KEY, JSON.stringify(days));
+      requestCloudSave();
     }
 
     function loadCurrentDayIndex(length) {
@@ -399,6 +427,7 @@
 
     function saveCurrentDayIndex() {
       localStorage.setItem(CURRENT_DAY_INDEX_KEY, String(currentDayIndex));
+      requestCloudSave();
     }
 
     function currentDay() {
@@ -970,6 +999,7 @@
 
     function saveUthTimes() {
       localStorage.setItem(UTH_TIMES_KEY, JSON.stringify(uthTimes));
+      requestCloudSave();
     }
 
     function parseMMSS(value) {
@@ -1041,6 +1071,108 @@
       timeInput.focus();
     });
 
+
+    function setSyncStatus(message) {
+      if (syncStatus) syncStatus.innerHTML = "<strong>Sync:</strong> " + message;
+    }
+
+    function getFullState() {
+      return {
+        days,
+        currentDayIndex,
+        uthTimes,
+        favorites,
+        favoriteGoals,
+        updatedAt: new Date().toISOString()
+      };
+    }
+
+    function saveAllLocalOnly() {
+      localStorage.setItem(DAY_STORAGE_KEY, JSON.stringify(days));
+      localStorage.setItem(CURRENT_DAY_INDEX_KEY, String(currentDayIndex));
+      localStorage.setItem(UTH_TIMES_KEY, JSON.stringify(uthTimes));
+      localStorage.setItem(FAVORITES_KEY, JSON.stringify(favorites));
+      localStorage.setItem(FAVORITE_GOALS_KEY, JSON.stringify(favoriteGoals));
+    }
+
+    function applyStateFromCloud(state) {
+      if (!state || typeof state !== "object") return;
+
+      if (Array.isArray(state.days) && state.days.length > 0) {
+        days = state.days.map(normalizeDay);
+      }
+
+      const importedIndex = Number(state.currentDayIndex);
+      currentDayIndex = Number.isInteger(importedIndex)
+        ? Math.min(Math.max(importedIndex, 0), days.length - 1)
+        : days.length - 1;
+
+      if (Array.isArray(state.uthTimes)) {
+        uthTimes = state.uthTimes.filter(Number.isInteger);
+      }
+
+      if (Array.isArray(state.favorites)) {
+        favorites = state.favorites.filter(monster => MONSTERS.includes(monster));
+      }
+
+      const goals = state.favoriteGoals && typeof state.favoriteGoals === "object" ? state.favoriteGoals : {};
+      favoriteGoals = {};
+      for (const monster of MONSTERS) {
+        const value = Number(goals[monster]);
+        if (Number.isFinite(value) && value > 0) favoriteGoals[monster] = Math.trunc(value);
+      }
+
+      saveAllLocalOnly();
+    }
+
+    async function loadCloudState() {
+      if (!supabaseClient) return null;
+
+      setSyncStatus("Lade Online-Daten ...");
+
+      const { data, error } = await supabaseClient
+        .from("tracker_states")
+        .select("data")
+        .eq("id", CLOUD_STATE_ID)
+        .maybeSingle();
+
+      if (error) {
+        console.error("Supabase load error:", error);
+        setSyncStatus("Online-Laden fehlgeschlagen. Nutze lokale Daten.");
+        return null;
+      }
+
+      return data?.data || null;
+    }
+
+    async function saveCloudState() {
+      if (!supabaseClient) {
+        setSyncStatus("Nur lokal gespeichert. Supabase noch nicht eingerichtet.");
+        return;
+      }
+
+      const { error } = await supabaseClient
+        .from("tracker_states")
+        .upsert({
+          id: CLOUD_STATE_ID,
+          data: getFullState(),
+          updated_at: new Date().toISOString()
+        }, { onConflict: "id" });
+
+      if (error) {
+        console.error("Supabase save error:", error);
+        setSyncStatus("Online-Speichern fehlgeschlagen. Lokale Sicherung ist aktiv.");
+      } else {
+        setSyncStatus("Online gespeichert.");
+      }
+    }
+
+    function requestCloudSave() {
+      if (!supabaseClient) return;
+      clearTimeout(cloudSaveTimer);
+      cloudSaveTimer = setTimeout(saveCloudState, 500);
+    }
+
     function renderAll() {
       saveCurrentDayIndex();
       renderSummary();
@@ -1051,8 +1183,22 @@
       renderUthTimes();
     }
 
-    switchTab("sessionTab");
-    renderAll();
+    async function initApp() {
+      switchTab("sessionTab");
+
+      const cloudState = await loadCloudState();
+      if (cloudState) {
+        applyStateFromCloud(cloudState);
+        setSyncStatus("Online-Daten geladen.");
+      } else if (supabaseClient) {
+        setSyncStatus("Keine Online-Daten gefunden. Lokale Daten werden hochgeladen ...");
+        await saveCloudState();
+      }
+
+      renderAll();
+    }
+
+    initApp();
   </script>
 </body>
 </html>
